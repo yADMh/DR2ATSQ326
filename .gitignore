@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+.pytest_cache/
+.env
+agendamento.db
+*.pyc
+uvicorn.log
+uvicorn.pid
+bandit_report.json

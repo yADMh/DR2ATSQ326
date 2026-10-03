@@ -1,0 +1,93 @@
+name: DevSecOps Pipeline
+
+on: [push, pull_request]
+
+jobs:
+  sast_sca:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety
+
+      - name: Run pytest
+        run: |
+          pip install -r requirements.txt
+          pytest -v
+
+      - name: Run Bandit (SAST) and export JSON
+        run: |
+          bandit -r app/ -f json -o bandit_report.json || true
+
+      - name: Run Safety (SCA)
+        run: |
+          safety check || true
+
+      - name: Security Gate (Bandit HIGH Severity)
+        run: |
+          python -c "
+          import json, sys
+          try:
+              with open('bandit_report.json') as f:
+                  data = json.load(f)
+              high_sev = [
+                  iss for iss in data.get('results', [])
+                  if iss.get('issue_severity') == 'HIGH'
+              ]
+              if high_sev:
+                  print(f'Falha no Security Gate: {len(high_sev)} vulnerabilidades HIGH encontradas.')
+                  sys.exit(1)
+              print('Security Gate aprovado: nenhuma vulnerabilidade HIGH encontrada.')
+          except Exception as e:
+              print('Erro ao processar relatório:', e)
+              sys.exit(1)
+          "
+
+  dast_zap:
+    runs-on: ubuntu-latest
+    needs: sast_sca
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Create test environment
+        run: |
+          echo "DATABASE_URL=sqlite:///./agendamento.db" >> .env
+          echo "SECRET_KEY=github_actions_test_secret" >> .env
+          echo "ALGORITHM=HS256" >> .env
+          echo "ACCESS_TOKEN_EXPIRE_MINUTES=30" >> .env
+
+      - name: Run FastAPI background
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+          echo $! > uvicorn.pid
+
+      - name: Wait for Server and Health Check
+        run: |
+          sleep 5
+          cat uvicorn.log
+          curl --fail http://localhost:8000/docs
+
+      - name: OWASP ZAP Passive Scan
+        uses: zaproxy/action-baseline@v0.15.0
+        continue-on-error: true
+        with:
+          target: 'http://localhost:8000'
+          artifact_name: 'zap-scan-report'
