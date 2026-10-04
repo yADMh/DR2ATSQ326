@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Agenda do Dia{% endblock %}
+{% block content %}
+    <h2>Consultas</h2>
+    <ul>
+        {% for consulta in consultas %}
+            <li>Data: {{ consulta.data_horario|e }} - Especialidade: {{ consulta.especialidade|e }} - Obs: {{ consulta.observacoes|e }}</li>
+        {% else %}
+            <li>Nenhuma consulta agendada para hoje.</li>
+        {% endfor %}
+    </ul>
+{% endblock %}

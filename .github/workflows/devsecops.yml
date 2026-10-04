@@ -1,0 +1,126 @@
+name: DevSecOps Pipeline
+
+on: [push, pull_request]
+
+jobs:
+  test_and_security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Configure test environment
+        run: |
+          echo "DATABASE_URL=sqlite:///./agendamento.db" >> .env
+          echo "SECRET_KEY=github_actions_test_secret" >> .env
+          echo "ALGORITHM=HS256" >> .env
+          echo "ACCESS_TOKEN_EXPIRE_MINUTES=30" >> .env
+          echo "M2M_CLIENT_ID=m2m_client" >> .env
+          echo "M2M_CLIENT_SECRET=test_m2m_secret" >> .env
+
+      - name: Run pytest
+        run: pytest -q
+
+      - name: Run Bandit
+        run: |
+          pip install bandit
+          bandit -r app/ -f json -o bandit_report.json
+          python - <<'PY'
+          import json
+          data = json.load(open("bandit_report.json"))
+          high = [r for r in data.get("results", []) if r.get("issue_severity") in {"HIGH", "CRITICAL"}]
+          if high:
+              raise SystemExit(f"Security Gate: {len(high)} findings HIGH/CRITICAL")
+          print("Security Gate aprovado.")
+          PY
+
+      - name: Generate OpenAPI
+        run: |
+          python - <<'PY'
+          import json
+          from app.main import app
+          with open("openapi.json", "w", encoding="utf-8") as f:
+              json.dump(app.openapi(), f, indent=2, ensure_ascii=False)
+          PY
+
+      - name: Checkov OpenAPI audit
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file: openapi.json
+          framework: openapi
+          soft_fail: true
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit_report.json
+            openapi.json
+
+  dast_zap:
+    runs-on: ubuntu-latest
+    needs: test_and_security
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure test environment
+        run: |
+          echo "DATABASE_URL=sqlite:///./agendamento.db" >> .env
+          echo "SECRET_KEY=github_actions_test_secret" >> .env
+          echo "ALGORITHM=HS256" >> .env
+          echo "ACCESS_TOKEN_EXPIRE_MINUTES=30" >> .env
+          echo "M2M_CLIENT_ID=m2m_client" >> .env
+          echo "M2M_CLIENT_SECRET=test_m2m_secret" >> .env
+
+      - name: Start API
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+          sleep 5
+          curl --fail http://localhost:8000/docs
+
+      - name: OWASP ZAP Baseline
+        uses: zaproxy/action-baseline@v0.15.0
+        continue-on-error: true
+        with:
+          target: "http://localhost:8000"
+          artifact_name: "zap-scan-report"
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: warn
